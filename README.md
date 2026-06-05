@@ -6,6 +6,14 @@ Pass in a pre-recorded audio file or let it record the meeting live from your mi
 
 ---
 
+## Acknowledgements
+
+This project was built on the foundation laid by **Duy Huynh**, whose guide on assembling a local voice assistant with Whisper, Ollama, and Bark was the starting point for this project. The meeting intelligence features in this repo grew out of that work.
+
+[Build Your Own Voice Assistant and Run it Locally — Duy Huynh](https://medium.com/@vndee.huynh/build-your-own-voice-assistant-and-run-it-locally-whisper-ollama-bark-c80e6f815cba)
+
+---
+
 ## Key Features
 
 - **Timestamped transcription** — every segment of speech is labelled with its start time so you can jump directly to the relevant moment.
