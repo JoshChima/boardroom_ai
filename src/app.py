@@ -6,7 +6,7 @@ Meeting Intelligence — Phase 2
      (--questions path) or are typed directly in the terminal.
 
 Usage:
-    python app.py meeting.wav [--questions questions.md] [--model llama3.1]
+    python app.py meeting.wav [--questions questions.md] [--agenda agenda.md] [--model llama3.1]
     python app.py              # no file → records from microphone
 
 # --- DEPRECATED (Phase 1 voice assistant) ---
@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import datetime
 import re
 import sys
 import time
@@ -45,7 +46,7 @@ console = Console()
 
 _SUMMARY_PROMPT = """\
 You are an expert meeting analyst. Below is a timestamped transcript of a meeting.
-
+{agenda_section}
 <transcript>
 {transcript}
 </transcript>
@@ -58,7 +59,7 @@ Provide a concise summary covering:
 
 _QA_PROMPT = """\
 You are an expert meeting analyst. Below is a timestamped transcript of a meeting.
-
+{agenda_section}
 <transcript>
 {transcript}
 </transcript>
@@ -71,6 +72,17 @@ and provide a concise summary of how it was answered. Cite the approximate times
 where relevant.
 - If the question was NOT addressed, start with "Not addressed:" and briefly note \
 any related topics that were discussed, if any.
+"""
+
+_AGENDA_SECTION = """\
+
+The following agenda was circulated to attendees before the meeting. It describes \
+the purpose of the meeting and the topics that were intended to be discussed. \
+It does not reflect what was actually said or decided — use the transcript for that.
+
+<agenda>
+{agenda}
+</agenda>
 """
 
 # ---------------------------------------------------------------------------
@@ -193,14 +205,27 @@ def ensure_model_available(model: str) -> None:
     console.print(f"[green]Model '{model}' pulled successfully.")
 
 
-def summarize_meeting(transcript: str, llm: ChatOllama) -> str:
+def _agenda_section(agenda: str | None) -> str:
+    if not agenda:
+        return ""
+    return _AGENDA_SECTION.format(agenda=agenda)
+
+
+def summarize_meeting(transcript: str, llm: ChatOllama, agenda: str | None = None) -> str:
     chain = ChatPromptTemplate.from_template(_SUMMARY_PROMPT) | llm
-    return chain.invoke({"transcript": transcript}).content.strip()
+    return chain.invoke({
+        "transcript": transcript,
+        "agenda_section": _agenda_section(agenda),
+    }).content.strip()
 
 
-def answer_question(question: str, transcript: str, llm: ChatOllama) -> str:
+def answer_question(question: str, transcript: str, llm: ChatOllama, agenda: str | None = None) -> str:
     chain = ChatPromptTemplate.from_template(_QA_PROMPT) | llm
-    return chain.invoke({"transcript": transcript, "question": question}).content.strip()
+    return chain.invoke({
+        "transcript": transcript,
+        "question": question,
+        "agenda_section": _agenda_section(agenda),
+    }).content.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +267,52 @@ def collect_questions_from_terminal() -> list:
 
 
 # ---------------------------------------------------------------------------
+# Report output
+# ---------------------------------------------------------------------------
+
+
+def _save_report(
+    output_dir: Path,
+    audio_source: Union[str, "np.ndarray"],
+    transcript: str,
+    summary: str,
+    qa_pairs: list[tuple[str, str]],
+    agenda: str | None,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    source_name = Path(audio_source).stem if isinstance(audio_source, str) else "mic_recording"
+    report_path = output_dir / f"{source_name}_{timestamp}.md"
+
+    lines = [f"# Meeting Report — {source_name}"]
+    lines.append(f"*Generated: {datetime.datetime.now().strftime('%B %d, %Y %H:%M')}*\n")
+
+    if agenda:
+        lines.append("## Agenda\n")
+        lines.append(agenda.strip())
+        lines.append("")
+
+    lines.append("## Transcript\n")
+    lines.append(transcript.strip())
+    lines.append("")
+
+    lines.append("## Summary\n")
+    lines.append(summary.strip())
+    lines.append("")
+
+    if qa_pairs:
+        lines.append("## Q&A\n")
+        for i, (q, a) in enumerate(qa_pairs, 1):
+            lines.append(f"**Q{i}: {q}**\n")
+            lines.append(a.strip())
+            lines.append("")
+
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    console.print(f"[green]Report saved → {report_path}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -264,15 +335,37 @@ def main() -> None:
              "If omitted, questions are entered interactively.",
     )
     parser.add_argument(
+        "--agenda",
+        "-a",
+        metavar="FILE",
+        help="Markdown file describing the meeting agenda. Provided to the LLM "
+             "as context for summarization and Q&A.",
+    )
+    parser.add_argument(
         "--model",
         default="llama3.1",
         metavar="MODEL",
         help="Ollama model to use (default: llama3.1).",
     )
+    parser.add_argument(
+        "--output-dir",
+        "-o",
+        metavar="DIR",
+        help="Folder to save a markdown report of the session (transcript, summary, Q&A).",
+    )
     args = parser.parse_args()
 
     ensure_model_available(args.model)
     llm = ChatOllama(model=args.model)
+
+    agenda: str | None = None
+    if args.agenda:
+        agenda_path = Path(args.agenda)
+        if not agenda_path.exists():
+            console.print(f"[red]Agenda file not found: {args.agenda}")
+            sys.exit(1)
+        agenda = agenda_path.read_text(encoding="utf-8")
+        console.print(f"[green]Agenda loaded: {args.agenda}")
 
     # ---- Step 1: Acquire audio ---------------------------------------------
     if args.audio:
@@ -296,7 +389,7 @@ def main() -> None:
     # ---- Step 3: Summarize -------------------------------------------------
     console.print(Rule("[bold cyan]Meeting Summary"))
     with console.status("Summarizing…", spinner="earth"):
-        summary = summarize_meeting(transcript, llm)
+        summary = summarize_meeting(transcript, llm, agenda)
     console.print(summary)
 
     # ---- Step 4: Q&A -------------------------------------------------------
@@ -315,15 +408,28 @@ def main() -> None:
     if not questions:
         questions = collect_questions_from_terminal()
 
+    qa_pairs: list[tuple[str, str]] = []
     if questions:
         console.print(Rule("[bold cyan]Q&A"))
         for i, q in enumerate(questions, 1):
             console.print(f"\n[bold yellow]Q{i}: {q}")
             with console.status(f"Answering Q{i}…", spinner="earth"):
-                answer = answer_question(q, transcript, llm)
+                answer = answer_question(q, transcript, llm, agenda)
             console.print(answer)
+            qa_pairs.append((q, answer))
 
     console.print(Rule("[bold green]Done"))
+
+    # ---- Step 5: Save report -----------------------------------------------
+    if args.output_dir:
+        _save_report(
+            output_dir=Path(args.output_dir),
+            audio_source=audio_source,
+            transcript=transcript,
+            summary=summary,
+            qa_pairs=qa_pairs,
+            agenda=agenda,
+        )
 
 
 if __name__ == "__main__":

@@ -3,6 +3,9 @@ rich
 openai-whisper
 torch
 numpy
+datasets
+datasets[audio]
+python-dotenv
 
 # LLM interface (LangChain)
 langchain
